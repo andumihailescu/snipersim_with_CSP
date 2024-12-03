@@ -6,6 +6,7 @@
 #include "nn_branch_predictor.h"
 #include "config.hpp"
 #include "stats.h"
+#include "hooks_manager.h" // PaulRosu@ULBS
 
 BranchPredictor::BranchPredictor()
    : m_correct_predictions(0)
@@ -87,4 +88,26 @@ void BranchPredictor::updateCounters(bool predicted, bool actual)
       ++m_correct_predictions;
    else
       ++m_incorrect_predictions;
+}
+
+// PaulRosu@ULBS
+void BranchPredictor::update(bool predicted, bool actual, bool indirect, IntPtr ip, IntPtr target)
+{
+   updateCounters(predicted, actual);
+   
+   // Create and populate branch prediction info
+   HooksManager::BranchPrediction info = {
+      ip,         // instruction pointer
+      predicted,  // predicted direction
+      actual,     // actual direction
+      indirect    // is indirect branch
+   };
+
+   //printf("[BRANCH_PREDICTOR] Calling hook with ip=%lx\n", (unsigned long)ip);
+
+   // Call Python hooks with branch prediction info
+   Sim()->getHooksManager()->callHooks(
+      HookType::HOOK_BRANCH_PREDICT, 
+      (UInt64)&info
+   );
 }
