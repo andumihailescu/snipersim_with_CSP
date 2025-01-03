@@ -18,7 +18,11 @@ Core state values:
 - NUM_STATES     7
 
 Example run command:
-paulrosu@WorkstationP1:~/experiments$ ~/snipersim_SCSP/run-sniper -v -n 4 -c gainestown --roi -s analysis_data_export --power -- ~/snipersim_SCSP/test/fft/fft -p 4
+paulrosu@WorkstationP1:~/experiments$ ~/snipersim_SCSP/run-sniper -v -n 4 -c gainestown --roi -s analysis_data_export:100:1 --power -- ~/snipersim_SCSP/test/fft/fft -p 4
+
+Arguments are the following:
+- <observation_window_us> specifies the observation window in microseconds (default: 100)
+- <sampling_period_us> specifies the sampling period in microseconds (default: 1)
 
 It will generate the following files, besides the usual ones:
 - core_state_patterns.csv
@@ -35,89 +39,149 @@ import sim
 import os
 import csv
 
+class CoreStateAnalyzer:
+    """Individual core analyzer - one instance per core"""
+    def __init__(self, core_id, results_folder, observation_window, sampling_period):
+        self.core_id = core_id
+        self.results_folder = results_folder
+        self.observation_window = observation_window
+        self.sampling_period = sampling_period
+        
+        self.active_records = {}        # key=event_id, value=record dict
+        self.completed_records = []     # store completed records in memory
+        self.next_event_id = 1         # track the next available event ID for this core
+
+    def record_branch_event(self, ip, predicted, actual, indirect):
+        """Record a new branch event for this core."""
+        event_id = self.next_event_id
+        self.next_event_id += 1
+        
+        record = {
+            'event_id': event_id,
+            'core_id': self.core_id,
+            'ip': ip,
+            'branch_taken': actual,
+            'start_time': sim.stats.time(),
+            'instruction_count': sim.stats.get('performance_model', self.core_id, 'instruction_count'),
+            'states': []
+        }
+        
+        self.active_records[event_id] = record
+        #print(f"[DEBUG] Core {self.core_id}: New branch event {event_id} at IP {hex(ip)}")
+
+    def collect_state_sample(self, time, time_delta):
+        """Collect state samples for this core's active recording windows."""
+        if time_delta == 0:
+            return
+
+        current_state = sim.dvfs.get_core_state(self.core_id)
+        
+        for event_id in list(self.active_records.keys()):
+            record = self.active_records[event_id]
+            elapsed_time = time - record['start_time']
+            
+            record['states'].append((elapsed_time, current_state))
+            
+            if elapsed_time > (self.observation_window * sim.util.Time.US):
+                self.completed_records.append(record)
+                del self.active_records[event_id]
+                # print("[DEBUG] Core %d: Completed record %d with %d states" % 
+                #       (self.core_id, event_id, len(record['states'])))
+
 class CoreStateAtBranchEventAnalyzer:
     def __init__(self):
         self.results_folder = None
         self.state_patterns_file = None
         self.analysis_summary_file = None
-        
-        self.observation_window = 100   # microseconds
-        self.sampling_period = 1       # microseconds
-        self.active_records = {}       # key=(event_id, ip), value=record dict
-        self.active_core_records = {}  # key=core_id, value=list of (event_id, ip)
-        self.completed_records = []    # store completed records in memory
-        self.total_branches = 0        # track total branches
-        self.next_event_id = 1         # track the next available event ID
+        self.observation_window = None  # Will be set in setup()
+        self.sampling_period = None     # Will be set in setup()
+        self.total_branches = 0
+        self.core_analyzers = {}
 
     def setup(self, args):
+        # Parse arguments similar to SCSP style
+        args = dict(enumerate((args or '').split(':')))
+        
+        # Default observation window 100 microseconds
+        self.observation_window = int(args.get(0, None) or 100)
+        
+        # Default sampling period 1 microsecond
+        self.sampling_period = int(args.get(1, None) or 1)
+        
         self.results_folder = sim.config.output_dir
         self.state_patterns_file = os.path.join(self.results_folder, "core_state_patterns.csv")
         self.analysis_summary_file = os.path.join(self.results_folder, "state_pattern_summary.csv")
-
-        for filepath in [self.state_patterns_file, self.analysis_summary_file]:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-
-        print(f"[CORE_ANALYZER] Initialized with observation_window={self.observation_window}us, sampling_period={self.sampling_period}us")
-
-        sim.util.EveryBranch(self.record_branch_event)
-        sim.util.Every(self.sampling_period * sim.util.Time.US, self.collect_state_sample)
-
-    def record_branch_event(self, ip, predicted, actual, indirect, core_id):
-        self.total_branches += 1
-        current_time = sim.stats.time()
-        current_instruction_count = sim.stats.icount()
-
-        event_id = self.next_event_id
-        self.next_event_id += 1
-
-        if core_id not in self.active_core_records:
-            self.active_core_records[core_id] = []
-
-        record_key = (event_id, ip)
-        event_record = {
-            'start_time': current_time,
-            'instruction_count': current_instruction_count,
-            'states': [],
-            'branch_taken': actual,
-            'core_id': core_id,
-            'event_id': event_id,
-            'ip': ip
-        }
-
-        self.active_records[record_key] = event_record
-        self.active_core_records[core_id].append(record_key)
         
+        # Create analyzers for each core
+        num_cores = sim.config.ncores
+        for core_id in range(num_cores):
+            self.core_analyzers[core_id] = CoreStateAnalyzer(
+                core_id, 
+                self.results_folder,
+                self.observation_window,
+                self.sampling_period
+            )
+        
+        # Register branch prediction callback using EveryBranch
+        def branch_callback(ip, predicted, actual, indirect, core_id):
+            self.hook_branch_predictor(core_id, ip, predicted, actual, indirect)
+        
+        # Register periodic callback using Every
+        self.periodic_hook = sim.util.Every(
+            self.sampling_period * sim.util.Time.US,  # Convert to femtoseconds
+            lambda time, time_delta: self.hook_periodic(time, time_delta)
+        )
+        
+        self.branch_hook = sim.util.EveryBranch(branch_callback)
+        
+        print(f"[CORE_ANALYZER] Initialized {num_cores} core analyzers")
+        print("[CORE_ANALYZER] Registered branch prediction and periodic callbacks")
+        print(f"[CORE_ANALYZER] Observation window [us]: {self.observation_window}")
+        print(f"[CORE_ANALYZER] Sampling period [us]: {self.sampling_period}")
 
-    def collect_state_sample(self, time, time_delta):
-        if time_delta == 0:
-            return
+    # These methods will be automatically called by Sniper's hook system
+    def hook_periodic(self, time, time_delta=0):
+        """Periodic hook for state sampling - delegates to each core analyzer."""
+        for analyzer in self.core_analyzers.values():
+            analyzer.collect_state_sample(time, time_delta)
 
-        for core_id, record_keys in list(self.active_core_records.items()):
-            if not record_keys:
-                continue
+    def hook_branch_predictor(self, core_id, ip, predicted, actual, indirect):
+        """Hook for branch events - delegates to appropriate core analyzer."""
+        #print("[DEBUG] Branch event detected on core %d at IP %s" % (core_id, hex(ip)))  # Add debug print
+        self.total_branches += 1
+        if core_id in self.core_analyzers:
+            self.core_analyzers[core_id].record_branch_event(ip, predicted, actual, indirect)
 
-            current_state = sim.dvfs.get_core_state(core_id)
-            for record_key in record_keys[:]:
-                record = self.active_records[record_key]
-                elapsed_time = time - record['start_time']
+    def hook_sim_end(self):
+        """Simulation end hook - combines and writes results from all cores."""
+        all_completed_records = []
+        
+        # Collect remaining active records and all completed records
+        for analyzer in self.core_analyzers.values():
+            print(f"[DEBUG] Core {analyzer.core_id} has {len(analyzer.completed_records)} completed records and {len(analyzer.active_records)} active records")
+            all_completed_records.extend(analyzer.completed_records)
+            for record in analyzer.active_records.values():
+                all_completed_records.append(record)
 
-                record['states'].append((elapsed_time, current_state))
+        print(f"[DEBUG] Writing {len(all_completed_records)} total records")
 
-                if elapsed_time > (self.observation_window * sim.util.Time.US):
-                    # Move this record to completed_records
-                    self.completed_records.append(record)
-                    del self.active_records[record_key]
-                    record_keys.remove(record_key)
+        # Write all records to file
+        with open(self.state_patterns_file, 'w', newline='') as f:
+            f.write("Event_ID,Instruction_Count,Start_Time,Core_ID,Branch_IP,Branch_Taken,States\n")
+            for record in all_completed_records:
+                states_str = ','.join(str(s) for _, s in record['states'])
+                f.write(f"{record['event_id']},{record['instruction_count']},{record['start_time']},{record['core_id']},{hex(record['ip'])},{record['branch_taken']},{states_str}\n")
 
-    def generate_analysis_summary(self):
-        # Analyze data directly from self.completed_records
-        print("[CORE_ANALYZER] Generating analysis summary...")
+        self.generate_analysis_summary(all_completed_records)
+        print(f"[CORE_ANALYZER] Total branches encountered: {self.total_branches}")
+
+    def generate_analysis_summary(self, all_records):
+        """Generate statistical summary from all cores' records."""
+        # Your existing generate_analysis_summary code, but using all_records parameter
         pattern_stats = {}
-        total_records = 0
+        total_records = len(all_records)
 
-        for record in self.completed_records:
-            total_records += 1
+        for record in all_records:
             ip = hex(record['ip'])
             branch_taken = record['branch_taken']
             states = [s for _, s in record['states']]
@@ -138,16 +202,12 @@ class CoreStateAtBranchEventAnalyzer:
                         pattern_stats[ip]['branch_taken_count'] += 1
 
         # Write pattern summary
-        with open(self.analysis_summary_file, 'w') as f:
+        with open(self.analysis_summary_file, 'w', newline='') as f:
             f.write("Branch_IP,Count,Avg_Idle_Position,Idle_Time_Percent,Branch_Taken_Ratio\n")
             for ip, stats in pattern_stats.items():
                 count = stats['count']
                 idle_positions = stats['idle_positions']
                 avg_position = sum(idle_positions) / len(idle_positions)
-                # observation_window samples = observation_window / sampling_period
-                # total samples per record = observation_window / sampling_period
-                # we have observation_window microseconds and sampling_period=1us => 
-                # total samples = observation_window
                 total_samples_per_record = self.observation_window
                 idle_percentage = (len(idle_positions) / (count * total_samples_per_record)) * 100
                 branch_taken_ratio = stats['branch_taken_count'] / count
@@ -156,20 +216,6 @@ class CoreStateAtBranchEventAnalyzer:
         print(f"[CORE_ANALYZER] Analyzed {total_records} total records")
         print(f"[CORE_ANALYZER] Found {len(pattern_stats)} branches with IDLE states")
 
-    def hook_sim_end(self):
-        # Finalize any events still active at simulation end
-        for record_key, record in self.active_records.items():
-            self.completed_records.append(record)
-        self.active_records.clear()
-
-        # Write all completed records to the state_patterns_file
-        with open(self.state_patterns_file, 'w') as f:
-            f.write("Event_ID,Instruction_Count,Start_Time,Core_ID,Branch_IP,Branch_Taken,States\n")
-            for record in self.completed_records:
-                states_str = ','.join(str(s) for _, s in record['states'])
-                f.write(f"{record['event_id']},{record['instruction_count']},{record['start_time']},{record['core_id']},{hex(record['ip'])},{record['branch_taken']},{states_str}\n")
-
-        self.generate_analysis_summary()
-        print(f"[CORE_ANALYZER] Total branches encountered: {self.total_branches}")
-
-sim.util.register(CoreStateAtBranchEventAnalyzer())
+# Register the analyzer
+analyzer = CoreStateAtBranchEventAnalyzer()
+sim.util.register(analyzer)
