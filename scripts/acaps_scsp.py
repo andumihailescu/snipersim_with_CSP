@@ -93,6 +93,7 @@ class Scsp:
       
       # If the current state is IDLE
       if (state == 5):
+        print("Setting idle frequency for core %d to %d MHz" % (core, self.idle_freq_mhz))
         new_freq = self.idle_freq_mhz
       else:
         new_freq = self.config_freq_mhz
@@ -109,6 +110,9 @@ class Scsp:
 
     for core in range(0, self.num_cores):
       actual_state = sim.dvfs.get_core_state(core)
+      # if core state is 5, print the actual state
+      if actual_state == 5:
+        print("Core %d is in IDLE state" % core)
       predictor = self.acsp[core]
 
       # Calculate average frequency for each core

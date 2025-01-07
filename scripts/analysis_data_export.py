@@ -177,7 +177,6 @@ class CoreStateAtBranchEventAnalyzer:
 
     def generate_analysis_summary(self, all_records):
         """Generate statistical summary from all cores' records."""
-        # Your existing generate_analysis_summary code, but using all_records parameter
         pattern_stats = {}
         total_records = len(all_records)
 

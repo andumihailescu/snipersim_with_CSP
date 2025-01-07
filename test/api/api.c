@@ -4,15 +4,24 @@
 #define __STDC_CONSTANT_MACROS
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <time.h>
 
-int value;
+volatile long long value;
 
-int loop() {
+long long loop() {
+	volatile int i;
+	
 
-	int i;
 	for (i = 0 ; i < 10000; i++) {
 		value += i;
 	}
+
+	struct timespec ts;
+	ts.tv_sec = 1;
+	ts.tv_nsec = 0;
+	nanosleep(&ts, NULL);
+	asm volatile("mfence");
 	return value;
 }
 
@@ -21,13 +30,8 @@ int main() {
 	SimRoiStart();
 
 	value = 0;
-	loop();
 
-	if (SimInSimulator()) {
-		printf("API Test: Running in the simulator\n"); fflush(stdout);
-	} else {
-		printf("API Test: Not running in the simulator\n"); fflush(stdout);
-	}
+	loop();
 
 	SimRoiEnd();
 }
