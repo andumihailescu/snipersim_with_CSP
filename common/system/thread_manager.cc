@@ -85,6 +85,7 @@ Thread* ThreadManager::createThread_unlocked(app_id_t app_id, thread_id_t creato
       Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
       thread->setCore(core);
       core->setState(Core::INITIALIZING);
+      printf("[CORE STATE DEBUG] Core %d is in INITIALIZING state due to createThread\n", core->getId());
    }
 
    Sim()->getStatsManager()->logEvent(StatsManager::EVENT_THREAD_CREATE, SubsecondTime::MaxTime(), core_id, thread_id, app_id, creator_thread_id, "");
@@ -120,6 +121,7 @@ void ThreadManager::onThreadStart(thread_id_t thread_id, SubsecondTime time)
    {
       // Set the CoreState to 'RUNNING'
       core->setState(Core::RUNNING);
+      printf("[CORE STATE DEBUG] Core %d is in RUNNING state due to onThreadStart\n", core->getId());
 
       PerformanceModel *pm = core->getPerformanceModel();
       // If the core already has a later time, we have to wait
@@ -175,6 +177,7 @@ void ThreadManager::onThreadExit(thread_id_t thread_id)
 
    // Set the CoreState to 'IDLE'
    core->setState(Core::IDLE);
+   printf("[CORE STATE DEBUG] Core %d is in IDLE state due to onThreadExit\n", core->getId());
 
    m_thread_tls->set(NULL);
    thread->setCore(NULL);
@@ -243,8 +246,11 @@ void ThreadManager::moveThread(thread_id_t thread_id, core_id_t core_id, Subseco
    Thread *thread = getThreadFromID(thread_id);
    CLOG("thread", "Move %d from %d to %d", thread_id, thread->getCore() ? thread->getCore()->getId() : -1, core_id);
 
-   if (Core *core = thread->getCore())
+   if (Core *core = thread->getCore()){
       core->setState(Core::IDLE);
+      printf("[CORE STATE DEBUG] Core %d is in IDLE state due to moveThread\n", core->getId());
+   }
+
 
    if (core_id == INVALID_CORE_ID)
    {
@@ -264,8 +270,10 @@ void ThreadManager::moveThread(thread_id_t thread_id, core_id_t core_id, Subseco
 
       Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
       thread->setCore(core);
-      if (getThreadState(thread_id) != Core::STALLED)
+      if (getThreadState(thread_id) != Core::STALLED){
          core->setState(Core::RUNNING);
+         printf("[CORE STATE DEBUG] Core %d is in RUNNING state due to moveThread\n", core->getId());
+      }
    }
 
    HooksManager::ThreadMigrate args = { thread_id: thread_id, core_id: core_id, time: time };

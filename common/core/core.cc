@@ -82,7 +82,7 @@ Core::Core(SInt32 id)
    , m_instructions_hpi_last(0)
 {
    LOG_PRINT("Core ctor for: %d", id);
-
+   printf("[CORE STATE DEBUG] Core %d is in IDLE state due to Core constructor default\n", id);
    registerStatsMetric("core", id, "instructions", &m_instructions);
    registerStatsMetric("core", id, "spin_loops", &m_spin_loops);
    registerStatsMetric("core", id, "spin_instructions", &m_spin_instructions);
